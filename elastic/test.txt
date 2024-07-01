@@ -1,0 +1,383 @@
+
+
+
+
+If you use Fleet or Elastic Agent, skip this tutorial. Fleet and Elastic Agent set up data streams for you. See Fleet’s data streams documentation.
+
+
+Index lifecycle
+edit
+
+ILM defines five index lifecycle phases:
+
+    Hot: The index is actively being updated and queried.
+    Warm: The index is no longer being updated but is still being queried.
+    Cold: The index is no longer being updated and is queried infrequently. The information still needs to be searchable, but it’s okay if those queries are slower.
+    Frozen: The index is no longer being updated and is queried rarely. The information still needs to be searchable, but it’s okay if those queries are extremely slow.
+    Delete: The index is no longer needed and can safely be removed.
+
+An index’s lifecycle policy specifies which phases are applicable, what actions are performed in each phase, and when it transitions between phases.
+
+
+When an index enters a phase, ILM caches the phase definition in the index metadata. This ensures that policy updates don’t put the index into a state where it can never exit the phase. If changes can be safely applied, ILM updates the cached phase definition. If they cannot, phase execution continues using the cached definition.
+
+
+Phase transitions
+edit
+
+ILM moves indices through the lifecycle according to their age. To control the timing of these transitions, you set a minimum age for each phase. For an index to move to the next phase, all actions in the current phase must be complete and the index must be older than the minimum age of the next phase. Configured minimum ages must increase between subsequent phases, for example, a "warm" phase with a minimum age of 10 days can only be followed by a "cold" phase with a minimum age either unset, or >= 10 days.
+
+The minimum age defaults to zero, which causes ILM to move indices to the next phase as soon as all actions in the current phase complete.
+
+
+
+Rollover condition blocks phase transition
+edit
+
+The rollover action only completes if one of its conditions is met. This means that any subsequent phases are blocked until rollover succeeds.
+
+For example, the following policy deletes the index one day after it rolls over. It does not delete the index one day after it was created.
+
+PUT /_ilm/policy/rollover_policy
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "50gb"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "1d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+
+
+
+
+Request body
+edit
+
+leader_index
+    (Required, string) The name of the index in the leader cluster to follow. 
+remote_cluster
+    (Required, string) The remote cluster containing the leader index. 
+data_stream_name
+    (Optional, string) If the leader index is part of a data stream, the name to which the local data stream for the followed index should be renamed. For example, A request like: 
+
+PUT /.ds-logs-mysql-default_copy-2022-01-01-000001/_ccr/follow
+{
+  "remote_cluster" : "remote_cluster",
+  "leader_index" : ".ds-logs-mysql-default-2022-01-01-000001",
+  "data_stream_name": "logs-mysql-default_copy"
+}
+
+Copy as curl
+Try in Elastic
+ 
+
+Replicates the leader index .ds-logs-mysql-default-2022-01-01-000001 into the follower index .ds-logs-mysql-default_copy-2022-01-01-000001 and will do so using the data stream logs-mysql-default_copy, as opposed to the original leader data stream name of logs-mysql-default.
+
+
+
+To automate rollover and management of a data stream with ILM, you:
+
+    Create a lifecycle policy that defines the appropriate phases and actions.
+    Create an index template to create the data stream and apply the ILM policy and the indices settings and mappings configurations for the backing indices.
+    Verify indices are moving through the lifecycle phases as expected.
+
+
+
+An SLM policy’s retention rules only apply to snapshots created using the policy. Other snapshots don’t count toward the policy’s retention limits.
+
+
+
+
+A snapshot is a backup of a running Elasticsearch cluster. You can use snapshots to:
+
+    Regularly back up a cluster with no downtime
+    Recover data after deletion or a hardware failure
+    Transfer data between clusters
+    Reduce your storage costs by using searchable snapshots in the cold and frozen data tiers
+
+
+How snapshots work
+edit
+Snapshots are automatically deduplicated to save storage space and reduce network transfer costs. To back up an index, a snapshot makes a copy of the index’s segments and stores them in the snapshot repository. Since segments are immutable, the snapshot only needs to copy any new segments created since the repository’s last snapshot.
+Each snapshot is also logically independent. When you delete a snapshot, Elasticsearch only deletes the segments used exclusively by that snapshot. Elasticsearch doesn’t delete segments used by other snapshots in the repository.
+
+
+Snapshots and shard allocation
+edit
+A snapshot copies segments from an index’s primary shards. When you start a snapshot, Elasticsearch immediately starts copying the segments of any available primary shards. If a shard is starting or relocating, Elasticsearch will wait for these processes to complete before copying the shard’s segments. If one or more primary shards aren’t available, the snapshot attempt fails.
+
+
+Structured search
+edit
+When you set "dynamic":"true", Elasticsearch will map string fields as a text field with a keyword subfield. If you are only indexing structured content and not interested in full text search, you can make Elasticsearch map your fields only as keyword fields. However, you must search on the exact same value that was indexed to search those fields.
+
+PUT my-index-000001
+{
+  "mappings": {
+    "dynamic_templates": [
+      {
+        "strings_as_keywords": {
+          "match_mapping_type": "string",
+          "mapping": {
+            "type": "keyword"
+          }
+        }
+      }
+    ]
+  }
+}
+
+
+
+
+
+
+
+    If I perform a complex search query against that index, will all 5 shards process the search or is it processed by only one/some of them??
+
+Only one shard will be used for your query. However, if at the same time you will start another query, that query will most likely end up on another node, the third query on the third node and so one. So, adding 4 more nodes will not improve latency of a single query, it will however improve throughput of the cluster if you run some of these queries simultaneously.
+
+If instead of creating 4 replicas for a single primary, you created 5 primaries, your query would have been sent to all 5 shards and executed in parallel on each shard. However, in this scenario, sending and merging results from 5 shards adds additional time to the processing. So, you improve latency by working on search in parallel but you add overhead of merging results. So, depending on your data and query it might improve or worsen your overall latency. It will worsen cluster throughput for simulations queries though since you are doing more work comparing to a single shard.
+
+    how does it determine which node to forward the request to?
+
+It depends on the version of elasticsearch and some settings. The modern versions of elasticsearch are using Adaptive replica selection by default. The older versions were using round robin, which is still available when you disable adaptive replica selection.
+
+
+
+
+Here is the official documentation and comments about shard replica and search performance effect:
+
+Replicas in Elasticsearch improve both search throughput and resiliency.
+
+    Fewer shards per node typically lead to better search performance due to larger filesystem cache allocation.
+
+However, having no replicas compromises data availability in case of a node failure. To determine the right number of replicas, use the formula: max(max_failures, ceil(num_nodes / num_primaries) - 1). This balances performance and fault tolerance.
+
+Also you can check this article: https://medium.com/@musabdogan/elasticsearch-search-performance-shard-configurations-and-replica-strategies-f32246b11aeb
+
+
+
+A snapshot repository is an off-cluster storage location for your snapshots. You must register a repository before you can take or restore snapshots.
+
+
+Registers or updates a snapshot repository.
+PUT /_snapshot/my_repository
+{
+  "type": "fs",
+  "settings": {
+    "location": "my_backup_location"
+  }
+}
+
+
+
+Request
+
+PUT /_snapshot/<repository>
+POST /_snapshot/<repository>
+
+
+Elasticsearch Service deployments automatically include the cloud-snapshot-policy SLM policy. Elasticsearch Service uses this policy to take periodic snapshots of your cluster. For more information, see the Elasticsearch Service snapshot documentation.
+
+
+PUT _slm/policy/nightly-cluster-state-snapshots
+{
+  "schedule": "0 30 2 * * ?",
+  "name": "<nightly-cluster-state-snap-{now/d}>",
+  "repository": "my_secure_repository",
+  "config": {
+    "include_global_state": true,                 
+    "indices": "-*"                               
+  },
+  "retention": {
+    "expire_after": "30d",
+    "min_count": 5,
+    "max_count": 50
+  }
+}
+
+
+
+PUT /_index_template/template_1
+{
+  "index_patterns" : ["t*"],
+  "priority" : 0,
+  "template": {
+    "settings" : {
+      "number_of_shards" : 1,
+      "number_of_replicas": 0
+    },
+    "mappings" : {
+      "_source" : { "enabled" : false }
+    }
+  }
+}
+
+
+
+When you take a snapshot using a source-only repository, Elasticsearch creates a source-only snapshot in the delegated storage repository. This snapshot only contains stored fields and metadata. It doesn’t include index or doc values structures and isn’t immediately searchable when restored. To search the restored data, you first have to reindex it into a new data stream or index.
+
+
+
+
+Painless execute API
+Use this API to build and test scripts, such as when defining a script for a runtime field. This API requires very few dependencies, and is especially useful if you don’t have permissions to write documents on a cluster.
+
+The API uses several contexts, which control how scripts are executed, what variables are available at runtime, and what the return type is.
+
+Each context requires a script, but additional parameters depend on the context you’re using for that script.
+
+
+
+
+Supported APIs
+edit
+
+The following APIs support cross-cluster search:
+
+    Search
+    Async search
+    Multi search
+    Search template
+    Multi search template
+    Field capabilities
+    Painless execute API
+    Resolve Index API
+    [preview] This functionality is in technical preview and may be changed or removed in a future release. Elastic will work to fix any issues, but features in technical preview are not subject to the support SLA of official GA features. EQL search
+    [preview] This functionality is in technical preview and may be changed or removed in a future release. Elastic will work to fix any issues, but features in technical preview are not subject to the support SLA of official GA features. SQL search
+    [preview] This functionality is in technical preview and may be changed or removed in a future release. Elastic will work to fix any issues, but features in technical preview are not subject to the support SLA of official GA features. Vector tile search
+    [preview] This functionality is in technical preview and may be changed or removed in a future release. Elastic will work to fix any issues, but features in technical preview are not subject to the support SLA of official GA features. ES|QL
+
+
+
+Matching Boolean Operations with the Bool Query Fields
+
+Let's get to the heart of these boolean operations and how they'd look without the and, or, not queries. In the bool query, we have the following fields:
+
+    must
+    must_not
+    should
+    filter
+
+Must is analogous to the boolean AND, must_not is analogous to the boolean NOT, and should is roughly equivalent to the boolean OR. Note that should isn't exactly like a boolean OR, but we can use it to that effect. And we’ll take a look at filter later on. 
+
+
+    OR is spelled should
+    AND is spelled must
+    NOR is spelled must_not
+
+
+
+Using minimum_should_match
+edit
+You can use the minimum_should_match parameter to specify the number or percentage of should clauses returned documents must match.
+If the bool query includes at least one should clause and no must or filter clauses, the default value is 1. Otherwise, the default value is 0.
+For other valid values, see the minimum_should_match parameter.
+
+
+
+
+To limit the documents on which all aggregations in a search run, use a top-level query. This is faster than a single filter aggregation with sub-aggregations.
+
+For example, use this:
+
+POST /sales/_search?size=0&filter_path=aggregations
+{
+  "query": { "term": { "type": "t-shirt" } },
+  "aggs": {
+    "avg_price": { "avg": { "field": "price" } }
+  }
+}
+
+Copy as curl
+Try in Elastic
+ 
+
+Instead of this:
+
+POST /sales/_search?size=0&filter_path=aggregations
+{
+  "aggs": {
+    "t_shirts": {
+      "filter": { "term": { "type": "t-shirt" } },
+      "aggs": {
+        "avg_price": { "avg": { "field": "price" } }
+      }
+    }
+  }
+}
+
+----------------------------------------------
+
+
+GET /_search?include_named_queries_score
+{
+  "query": {
+    "bool": {
+      "should": [
+        { "match": { "name.first": { "query": "shay", "_name": "first" } } },
+        { "match": { "name.last": { "query": "banon", "_name": "last" } } }
+      ],
+      "filter": {
+        "terms": {
+          "name.last": [ "banon", "kimchy" ],
+          "_name": "test"
+        }
+      }
+    }
+  }
+}
+
+
+-----------------------------------------  
+
+
+
+
+
+POST /_security/role/dept_role
+{
+  "indices" : [
+    {
+      "names" : [ "*" ],
+      "privileges" : [ "read" ],
+      "query" : {
+        "term" : { "department_id" : 12 }
+      }
+    }
+  ]
+}
+
+
+
+ from a malicious or benign domain.
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/query-dsl-boosting-query.html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

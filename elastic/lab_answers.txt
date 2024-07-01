@@ -1,0 +1,1096 @@
+
+
+-------------------------------------------------------
+Create the sample_data snapshot repository at /mnt/backups/sample_data on the c1 cluster. 
+Then, create the nightly snapshot lifecycle management (SLM) policy as follows:
+
+    Back up the kibana_sample_data_ecommerce, kibana_sample_data_logs, and kibana_sample_data_flights indices everyday at 2:00 a.m.
+    Back up to the sample_data repository.
+    Name each snapshot nightly-, followed by the current date.
+    Do not include the cluster state.
+    Keep at least 7 snapshots but no more than 30.
+
+
+
+PUT /_snapshot/sample_data
+{
+  "type": "fs",
+  "settings": {
+    "location": "/mnt/backups/sample_data"
+  }
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/put-snapshot-repo-api.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/create-snapshot-api.html
+
+
+PUT _slm/policy/daily-snapshots
+{
+  "name": "<nightly-{now/d}>",
+  "schedule": "0 6 * * *",          
+  "repository": "sample_data",
+  "config": {
+    "indices": "kibana_sample_data_ecommerce, kibana_sample_data_logs, and kibana_sample_data_flights",
+    "include_global_state": false
+  },
+  "retention": {
+    "expire_after": "30d",
+    "min_count": 7,
+    "max_count": 30
+  }
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/trigger-schedule.html#schedule-cron
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/snapshots-take-snapshot.html
+
+
+Create the alerts_policy index lifecycle management (ILM) policy on the c1 cluster with the following criteria:
+
+    Hot phase:
+        Roll the index over at the max primary shard size of 10gb.
+        After rollover, force merge the index into 1 segment for increased read performance.
+        Set the index as read-only after force merging.
+    Cold phase:
+        Enter the cold phase after 30 days.
+        Convert the index to a mounted searchable snapshot in the sample_data repository.
+    Delete phase:
+        Enter the delete phase after 180 days.
+        Delete the index.
+
+
+
+
+-------------------------------------------------------
+Create the shakespeare snapshot repository at /mnt/backups/shakespeare on the c1 cluster. 
+Then, create the original snapshot of the shakespeare index at the shakespeare repository.
+
+
+PUT /_snapshot/shakespeare
+{
+  "type": "fs",
+  "settings": {
+    "location": "/mnt/backups/shakespeare"
+  }
+}
+
+
+
+PUT /_snapshot/shakespeare/original
+{
+  "indices": "shakespeare"
+}
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/create-snapshot-api.html
+
+-------------------------------------------------------
+Create the strings_as_keywords component template on the c1 cluster to dynamically convert all string fields into keyword fields with a max size of 256 characters.
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/dynamic-templates.html
+
+PUT my-index-000001
+{
+  "mappings": {
+    "dynamic_templates": [
+      {
+        "strings_as_keywords": {
+          "match_mapping_type": "string",
+          "mapping": {
+            "type": "keyword"
+          }
+        }
+      }
+    ]
+  }
+}
+-------------------------------------------------------
+
+Create the shards component template on the c1 cluster to configure 1 primary and 0 replica shards.
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/indices-component-template.html
+
+
+PUT /_component_template/shards
+{
+  "template": {
+    "settings" : {
+        "number_of_shards" : 1,
+		"number_of_replicas": 0
+    }
+  },
+}
+-------------------------------------------------------
+
+Create the alerts_template index template on the c1 cluster with the following criteria:
+
+    Configure the template to manage the alerts_stream data stream.
+    Compose the template of the stings_as_keywords and shards component templates.
+    Configure the template to use the alerts_policy ILM policy
+	
+	
+PUT _index_template/template_1
+{
+  "index_patterns": ["alerts_stream"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+	  "index.lifecycle.name": "alerts_policy"
+    },
+  },
+  "composed_of": ["stings_as_keywords", "shards"], 
+}	
+	
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/indices-put-template.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/index-templates.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/indices-templates-v1.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/set-up-lifecycle-policy.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ilm-settings.html
+
+---------------------------------------------------
+Start the alerts_stream data stream on the c1 cluster.
+
+PUT /_data_stream/alerts_stream
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/indices-create-data-stream.html
+---------------------------------------------------
+
+
+
+
+Download and extract the crop_yields dataset. Then use the Data Visualizer to index the dataset to a new crop_yields index with 1 primary and 0 replica shards on the c1 cluster.
+Remotely reindex the accounts index from the c2 cluster to the c1 cluster with the following transformations:
+
+    Remove the account_number, age, and gender fields.
+    Index all string fields as type keyword with the exception of the address field, which should be indexed as a text field with a keyword multi-field that only indexes the first 256 characters.
+    Index the balance field as type double.
+    Add a tos_ack field with type boolean.
+    Set the tos_ack field to false for accounts with state equal to VA and set the tos_ack field to true for all other accounts.
+    Allocate the accounts index on the c1 cluster with 1 primary and 0 replica shards.
+
+
+
+PUT /_component_template/shards
+{
+  "template": {
+    "settings" : {
+        "number_of_shards" : 1,
+		"number_of_replicas": 0
+    }
+  },
+}
+
+
+
+POST _reindex
+{
+  "source": {
+    "remote": {
+      "host": "http://otherhost:9200",
+      "username": "user",
+      "password": "pass"
+    },
+    "index": "accounts",
+	"_source": [
+	 "excludes": [ "account_number", "age", "gender" ]
+	]
+    "query": {
+      "match": {
+        "test": "data"
+      }
+    }
+  },
+  "dest": {
+    "index": "accounts"
+  }
+  "script": {
+    "source": "if (ctx._source.state  !== 'VA') {ctx._source.tos_ack = true};
+	            ctx._source.remove(\"account_number\"); ctx._source.remove(\"age\"); ctx._source.remove(\"gender\");"  
+				 
+				 ",
+    "lang": "painless"
+  }
+    "mappings": {
+    "dynamic_templates": [
+      {
+        "balance_as_double": {
+          "match":   "balance",
+          "mapping": {
+            "type": "double"
+          }
+        },
+        "address_as_text": {
+          "match":   "address",
+          "mapping": {
+            "type": "text",
+            "norms": false,
+            "fields": {
+              "keyword": {
+                "type": "keyword",
+                "ignore_above": 256
+              }
+            }
+          }
+        },
+	   "strings_as_keywords": {
+          "match_mapping_type": "string",
+		   "unmatch": "address",
+          "mapping": {
+            "type": "keyword"
+          }
+        }
+    ]
+  }
+},
+  "composed_of": ["shards"], 
+  }
+
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/docs-reindex.html
+https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-reindex.html#reindex-from-remote
+
+To get ip nodes:
+https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-nodes-info.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-fields.html#source-filtering
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/mapping-source-field.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/dynamic-templates.html
+https://www.elastic.co/guide/en/elasticsearch/reference/current/dynamic-mapping.html
+https://www.elastic.co/guide/en/elasticsearch/reference/current/dynamic-templates.html
+
+
+---------------------------------------------------
+
+Delete the accounts index from the c2 cluster.
+
+DELETE /address
+
+https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-delete-index.html
+
+---------------------------------------------------
+
+Reindex the shakespeare index to a new index called shakespeare_refactored on the c1 cluster with the following configuration:
+
+    Index the line_number, play_name, speaker, and type fields as type keyword.
+    Index the text_entry field as type text.
+    Index the line_id and speech_number fields as type long.
+    Configure the default analyzer to use the classic tokenizer and remove english stop words case-insensitively.
+    Configure the index with 1 primary and 0 replica shards.
+
+
+
+POST _reindex
+{
+  "source": {
+    "remote": {
+      "host": "http://otherhost:9200",
+      "username": "user",
+      "password": "pass"
+    },
+    "index": "shakespeare",
+    "query": {
+      "match": {
+        "test": "data"
+      }
+    }
+  },
+  "dest": {
+    "index": "shakespeare_refactored"
+  }
+  "script": {
+   "source": "ctx._source.line_number = Integer.toString(ctx._source.line_number);", 
+				 ",
+    "lang": "painless"
+  }
+    "mappings": {
+    "dynamic_templates": [
+      {
+        "balance_as_long": {
+          "match":   ["line_id",  "speech_number"], 
+          "mapping": {
+            "type": "long"
+          }
+        },
+        "text_entry_as_text": {
+          "match":   "text_entry",
+          "mapping": {
+            "type": "text",
+          }
+        },
+	   "strings_as_keywords": {
+	    "match":   ["line_number", "play_name", "speaker", "type" ],
+          "mapping": {
+            "type": "keyword"
+          }
+        }
+    ]
+  }
+},
+  "composed_of": ["shards"], 
+  },
+   "settings": {
+    "analysis": {
+      "analyzer": {
+        "whitespace_lowercase": {
+          "tokenizer": "whitespace",
+          "filter": [ "lowercase" ]
+        }
+      }
+    }
+  }
+     "index": {
+      "analysis": {
+        "analyzer": {
+          "analyzer_with_stop": {
+            "tokenizer": "standard",
+            "filter": [
+              "lowercase",
+              "english_stop"
+            ]
+          }
+        },
+        "filter": {
+          "english_stop": {
+            "type": "english_stop",
+            "stopwords": [
+              "_english_"
+            ]
+          }
+        }
+      }
+    }
+
+
+https://stackoverflow.com/questions/49247059/elasticsearch-set-type-of-field-while-reindexing-can-it-be-done-with-reindex
+https://stackoverflow.com/questions/58729742/elasticsearch-update-document-field-value-from-interger-to-string
+https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-update-by-query.html
+
+https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-update-context.html
+https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-context-examples.html
+https://www.elastic.co/guide/en/elasticsearch/painless/current/painless-datetime.html#painless-datetime
+https://www.elastic.co/guide/en/elasticsearch/plugins/8.9/analysis-polish-stop.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/analysis-stop-tokenfilter.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/analysis-lowercase-tokenfilter.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/indices-analyze.html
+
+---------------------------------------------------
+Delete the shakespeare index on the c1 cluster and add the alias shakespeare to the shakespeare_refactored index.
+
+DELETE /shakespeare
+
+PUT shakespeare_refactored/_alias/shakespeare
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/indices-add-alias.html
+---------------------------------------------------
+
+Update the shakespeare index on the c1 cluster to fix the misspelled "A Winners Tale" play_name to "A Winter's Tale".
+
+
+POST shakespeare/_update_by_query
+{
+  "script": {
+    "source": "if (ctx._source['play_name'] == 'A Winners Tale') {ctx._source['play_name'] = 'A Winter's Tale'}"
+  }
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/docs-update-by-query.html
+
+---------------------------------------------------
+Reindex the kibana_sample_data_ecommerce index to a new index called ecommerce_fixed on the c1 cluster with the following configuration:
+
+    Maintain all the same mappings, with the only exception being that the products object should maintain the relationships between nested arrays of objects.
+    Configure the index with 1 primary and 0 replica shards.
+
+???
+ {
+>   "source": {
+>     "index": "original",
+>     "_source": [
+>       "tags"
+>     ]
+>   },
+>   "dest": {
+>     "index": "destination"
+>   },
+>   "script": {
+>     "source": "def from = ctx._source.tags; if (from !== null) { List nested = new ArrayList(); for (tag in from) { nested.add(Collections.singletonMap('value', tag)); } ctx._source.tags = nested; }"
+>   }
+> }
+???
+---------------------------------------------------
+Delete the kibana_sample_data_ecommerce index on the c1 cluster and add the aliases kibana_sample_data_ecommerce and ecommerce to the ecommerce_fixed index.
+DELETE /kibana_sample_data_ecommerce
+
+PUT ecommerce_fixed/_alias/kibana_sample_data_ecommerce
+
+PUT ecommerce_fixed/_alias/ecommerce
+
+---------------------------------------------------
+
+---------------------------------------------------
+Create the products search template on the c1 cluster to search against the ecommerce dataset with the following requirements:
+
+    Paginate and parameterize the search results with a default page size of 25 and display the first page by default.
+    Perform a nested type match query on the products path and the products.product_name field with the product parameter.
+    Highlight the search term in the products.product_name field by wrapping the search term in HTML <mark> tags (for example, <mark>search_term</mark>).
+    Sort the search results by geoip.continent_name, then by geoip.city_name, and then by relevancy score, all in descending order.
+
+
+PUT _scripts/products_template
+{
+  "script": {
+    "lang": "mustache",
+    "source": {
+	  "query": {
+		"nested": {
+		  "path": "products",
+			  "query": {
+				"bool": {
+				  "must": [
+					{ "match": { "products.product_name":  "{{product_parameter}}" } }
+				  ]
+				}
+		  }
+		}
+	  }
+      "from": "{{from}}",
+      "size": "{{size}}",
+	   "highlight" : {
+        "pre_tags" : ["<mark>"],
+        "post_tags" : ["</mark>"],
+        "fields" : {
+            "body" : {}
+        }
+    }
+	 "sort" : [
+       {
+          "geoip.continent_name" : {
+             "order" : "desc"
+          },
+		   "geoip.city_name" : {
+             "order" : "desc",
+          }
+       }
+    ],
+	 "aggs": {
+		"top_sites": {
+		  "terms": {
+			"field": "domain",
+			"order": {
+			  "top_hit": "desc"
+			}
+		  },
+	   }
+    },
+    "params": {
+      "query_string": "My query string",
+	  "from": 0,
+	  "size": 25
+	  
+    }
+  }
+  
+  
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-template.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-template-with-mustache-examples.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/query-dsl-nested-query.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/7.2/search-request-highlighting.html
+https://www.elastic.co/guide/en/elasticsearch/plugins/8.9/mapper-annotated-text-highlighter.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/sort-search-results.html
+---------------------------------------------------
+
+
+Validate a search template
+POST _render/template
+{
+  "id": "products_template",
+  "params": {
+    "product_parameter": "product_1",
+    "from": 2,
+    "size": 10
+  }
+}
+
+Run a templated search
+GET my-index/_search/template
+{
+  "id": "products_template",
+  "params": {
+    "product_parameter": "product_1",
+    "from": 0,
+    "size": 10
+  }
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-template.html
+
+---------------------------------------------------
+Configure and execute a cross-cluster search query from the c1 cluster to search the filebeat-7.13.4 index 
+on both the c1 and c2 clusters with the following search criteria:
+
+    Return up to 100 search results
+    All of the following must match:
+        The term system for the event.module field
+        The term /var/log/secure for the log.file.path field
+        The term sshd for the process.name field
+    At least one of the following should match:
+        The phrase invalid user for the message field
+        The phrase authentication failure for the message field
+        The phrase failed password for the message field
+    The following must not match:
+        The word cloud_user for the message field
+
+GET /filebeat-7.13.4,c2:filebeat-7.13.4/_search
+{
+  "size": 100,
+  "query": {
+    "match": {
+      "event.module": "system",
+	  "process.name": "sshd",
+    },
+	"nested": {
+		  "path": "log",
+			  "query": {
+				"bool": {
+				  "must": [
+					{ "match": { "file.path":  "/var/log/secure" } }
+				  ]
+				}
+		  }
+	}
+	"must_not" : {
+        "message" : "cloud_user"
+     },
+    "should" : [
+        { "term" : { "message" : "invalid user" } },
+		{ "term" : { "message" : "authentication failure" } },
+        { "term" : { "message" : "failed password" } }
+      ],
+  }
+}
+
+https://www.elastic.co/blog/lost-in-translation-boolean-operations-and-filters-in-the-bool-query
+https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl-bool-query.html
+
+
+---------------------------------------------------
+Create and execute an asynchronous search query on the filebeat-7.13.4 dataset on the c1 cluster to search log messages for any mention of "cloud_user" 
+with the wait_for_completion_timeout parameter set to 0. Then, fetch the async search results.
+
+GET /filebeat-7.13.4,c1:filebeat-7.13.4/_async_search
+{
+  "wait_for_completion_timeout ": 0,
+  "query": {
+    "bool" : {
+      "must" : {
+        "term" : { "messages" : "cloud_user" }
+      },
+      "minimum_should_match" : 1,
+      "boost" : 1.0
+    }
+  }
+}
+
+GET /_async_search/___id_
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/async-search.html#get-async-search
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/query-dsl-bool-query.html#bool-min-should-match
+
+---------------------------------------------------
+Aggregating Data
+
+
+
+Create an aggregation to answer each of the following questions. 
+Be sure to return a hits array size of 0 for each aggregation since we only care about the aggregation output.
+
+    For the flights index on the c1 cluster, how many unique destination locations are there?
+    For the flights index on the c1 cluster, what are the top 3 destination weather conditions?
+    For the crop_yields index on the c1 cluster, what top 5 countries had the highest average rye yields during the 1980s?
+    For the crop_yields index on the c1 cluster, what is the total crop yield of maize in the United States since the year 2000?
+    For the logs index on the c1 cluster, what is the rate of change for the sum of bytes per day and what is the overall min, max, average, and sum rate of change?
+
+
+
+    For the flights index on the c1 cluster, how many unique destination locations are there?
+    
+	Bucket Aggregation :
+	GET /flights/_search
+	{
+	  "aggs": {
+		"locations": {
+		  "rare_terms": {
+			"field": "locations"
+		  }
+		}
+	  }
+	}
+	
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-bucket-rare-terms-aggregation.html
+	
+	 
+	For the flights index on the c1 cluster, what are the top 3 destination weather conditions?
+	
+	POST /flights,c1:flights/_search?size=0&filter_path=aggregations
+	{
+	  "aggs": {
+		"top_tags": {
+		  "terms": {
+			"field": "weather_conditions",
+			"size": 3
+		  },
+	  }
+	}}
+	
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-filter-aggregation.html
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-metrics-top-hits-aggregation.html
+	
+	For the crop_yields index on the c1 cluster, what top 5 countries had the highest average rye yields during the 1980s?
+    //	  "query": { "term": { "yields": "rye" } },
+	
+	POST /crop_yields,c1:crop_yields/_search?size=0&filter_path=aggregations
+	{
+	  "query": {
+		"bool" : {
+		  "must" : {
+			"term" : { "yields" : "rye" }
+		  },
+		   "must" : {
+			"term" : { "year" : 1980" }
+		  },
+		}
+	  }
+	  "aggs": {
+		"avg_price": { "avg": { "field": "yields" } }
+	  }
+	}
+
+    https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-filter-aggregation.html#use-top-level-query-to-limit-all-aggs
+	
+	For the crop_yields index on the c1 cluster, what is the total crop yield of maize in the United States since the year 2000?
+    
+	version_1
+	POST /crop_yields,c1:crop_yields/_search?size=0
+	{
+	  "query": {
+		"constant_score": {
+		  "filter": {
+		    "terms": {
+		/////	  "name.last": [ "banon", "kimchy" ],
+			  "crop": "maize",
+			  "country": "United States"
+			}
+		  }
+		}
+	  },
+	  "aggs": {
+		"maize_yield": { "sum": { "field": "maize" } },
+		   "range": {
+			  "date_range": {
+				"field": "year",
+				"format": "yyyy",
+				"ranges": [
+				  { "to": "now" },  
+				  { "from": "2000" } 
+				]
+			  }
+			}
+	  }
+	}
+	
+	version_2
+	POST /crop_yields,c1:crop_yields/_search?size=0
+	{
+	 "aggs": {
+	     "f": {
+		  "filters": {
+			"filters": {
+			  "f_crop": { "term": { "crop": "maize" } },
+			  "f_country": { "term": { "country": "United States" } }
+			}
+		  },
+		 }
+		  "aggs": {
+			"maize_yield": { "sum": { "field": "maize" } },
+			   "range": {
+				  "date_range": {
+					"field": "year",
+					"format": "yyyy",
+					"ranges": [
+					  { "to": "now" },  
+					  { "from": "2000" } 
+					]
+				  }
+				}
+		  }
+	}
+	
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-filter-aggregation.html
+	
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-daterange-aggregation.html
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-filter-aggregation.html#use-top-level-query-to-limit-all-aggs
+	https://www.elastic.co/guide/en/elasticsearch/reference/8.9/search-aggregations-bucket-filter-aggregation.html
+	
+	
+	For the logs index on the c1 cluster, what is the rate of change for the sum of bytes per day and what is the overall min, max, average, and sum rate of change?
+
+
+    POST /logs,c1:logs/_search?size=0
+	{
+	"size": 0,
+	  "aggs": {
+		"by_date": {
+		  "date_histogram": {
+			"field": "date",
+			"calendar_interval": "day"  
+		  },
+		  "aggs": {
+			"avg_bytes_by_day": {
+              "rate": {
+              "field": "bytes", 
+              "unit": "day" 
+			  }
+			}
+			"min_bytes": { "min": { "field": "bytes" } }
+			"max_bytes": { "max": { "field": "bytes" } }
+			"sum_bytes": { "sum": { "field": "bytes" } }
+			"avg_bytes": { "avg": { "field": "bytes" } }
+		  }
+		}
+	  }
+   }   
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-metrics-rate-aggregation.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-metrics-sum-aggregation.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-metrics-max-aggregation.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-metrics-min-aggregation.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-metrics-avg-aggregation.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/search-aggregations-bucket-terms-aggregation.html
+---------------------------------------------------
+
+Replicating, Securing, and Restoring Data
+Replicate the accounts index from the c1 cluster to the c2 cluster.
+
+
+Check current cluster name:
+https://www.elastic.co/guide/en/elasticsearch/reference/current/cluster-info.html
+# returns all stats info of the cluster
+GET /_info/_all
+
+
+GET /_remote/info
+
+
+Remote cluster
+The following request creates a remote-replication role on the remote cluster:
+
+POST /_security/role/remote-replication
+{
+  "cluster": [
+    "read_ccr"
+  ],
+  "indices": [
+    {
+      "names": [
+        "leader-index-name"
+      ],
+      "privileges": [
+        "monitor",
+        "read"
+      ]
+    }
+  ]
+}
+
+
+Local cluster
+On the local cluster that contains the follower index, the remote-replication role requires the manage_ccr cluster privilege, 
+and monitor, read, write, and manage_follow_index privileges on the follower index.
+The following request creates a remote-replication role on the local cluster:
+
+POST /_security/role/remote-replication
+{
+  "cluster": [
+    "manage_ccr"
+  ],
+  "indices": [
+    {
+      "names": [
+        "follower-index-name"
+      ],
+      "privileges": [
+        "monitor",
+        "read",
+        "write",
+        "manage_follow_index"
+      ]
+    }
+  ]
+}
+
+
+Elasticsearch initializes the follower using the remote recovery process, which transfers the existing Lucene segment files from the leader index to the follower index.
+ The index status changes to Paused. When the remote recovery process is complete, the index following begins and the status changes to Active.
+Creates a follower index.
+PUT /accounts/_ccr/follow?wait_for_active_shards=1
+{
+  "remote_cluster" : "<remote_cluster>",
+  "leader_index" : "remote_accounts"
+}
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ccr-put-follow.html
+
+Get follower stats.
+GET /accounts/_ccr/stats
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ccr-get-follow-stats.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ccr-getting-started-tutorial.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ccr-put-follow.html
+
+---------------------------------------------------
+Auto-replicate new indices belonging to the alerts_stream data stream from the c1 cluster to the c2 cluster.
+
+c1 -> local cluster
+c2 -> remote cluster
+
+Use the create auto-follow pattern API to configure auto-follow patterns.
+PUT /_ccr/auto_follow/beats
+{
+  "remote_cluster" : "c2",
+  "leader_index_patterns" :
+  [
+    "alerts_stream", 
+  ],
+  "follow_index_pattern" : "alerts_stream-copy" 
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/ccr-getting-started-tutorial.html
+
+
+---------------------------------------------------
+Create the us_customers_read role on the c1 cluster with the following criteria:
+    Grants read access to the ecommerce index.
+    Only grants access to the customer_full_name, email, customer_phone, and customer_id fields.
+    Only grants access to customers from the United States. (The United States country ISO code is US.)  ????
+
+
+The following role grants read access only to the documents whose department_id equals 12:
+
+POST /_security/role/us_customers_read
+{
+  "cluster": ["c1"],
+  "indices": [
+    {
+      "names": [ "ecommerce" ],
+      "privileges": ["read"],
+      "field_security" : { // grant access for fields
+        "grant" : [ "customer_full_name", "email", "customer_phone", "customer_id" ]
+      },
+  
+    }
+  ],
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/security-api-put-role.html
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/field-level-security.html
+
+---------------------------------------------------
+Create the user mbender on the c1 cluster with the following criteria:
+
+    Full name is Michael Bender
+    Email address is mbender@company.com
+    Password is kUwn7euAj45t
+    Roles are us_customers_read and kibana_user
+
+
+POST /_security/user/mbender
+{
+  "password" : "kUwn7euAj45t",
+  "roles" : [ "us_customers_read", "kibana_user" ],
+  "full_name" : "Michael Bender",
+  "email" : "mbender@company.com",
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/security-api-put-user.html
+---------------------------------------------------
+
+Restore the shakespeare index on the c1 cluster from the original snapshot in the shakespeare_repo repository as the shakespeare_original index.
+
+In order to restore the data we need to find a snapshot that contains these two indices. To find such a snapshot use the get snapshot API.
+GET _snapshot/shakespeare/*?verbose=false
+
+Assumption:  snapshot name => my_snapshot123
+
+
+POST shakespeare/_close
+
+You can confirm that they are closed with the cat indices API.
+
+GET _cat/indices?v&health=red&h=index,status,health
+
+
+The indices are closed, now we can restore them from snapshots without causing any complications using the restore snapshot API:
+POST _snapshot/shakespeare_repo/my_snapshot123/_restore
+{
+  "indices": "shakespeare", 
+  "rename_replacement": "shakespeare_original",
+  "include_aliases": false                                                       
+}
+
+
+GET _cat/indices?v&index=shakespeareh=index,status,health
+
+======
+Restore in place
+POST index_1/_close
+
+POST /_snapshot/my_repository/snapshot_2/_restore?wait_for_completion=true
+{
+  "indices": "index_1"
+}
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/restore-from-snapshot.html
+---------------------------------------------------
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.13/semantic-search-inference.html
+
+https://www.elastic.co/guide/en/elasticsearch/reference/8.9/set-up-a-data-stream.html
+
+https://stackoverflow.com/questions/33858542/how-to-really-reindex-data-in-elasticsearch
+
+
+---------------------------------------------------------
+ML Embeded models:
+POST _ingest/pipeline/_simulate
+{
+   "pipeline":{
+      "processors":[
+         {
+            "inference":{
+               "model_id":"lang_ident_model_1", 
+               "inference_config":{
+                  "classification":{
+                     "num_top_classes":5 
+                  }
+               },
+               "field_map":{
+
+               }
+            }
+         }
+      ]
+   },
+   "docs":[
+      {
+         "_source":{ 
+            "text":"Jednak dopiero 8 maja 2020 roku prezydent Andrzej Duda podpisał ustawę o szczególnych zasadach przeprowadzania wyborów powszechnych na Prezydenta RP zarządzonych w 2020 roku, a weszła ona w życie 9 maja. Ustawa została uchwalona przez Sejm 6 kwietnia z inicjatywy PiS. Przewidywała, że głosowanie w wyborach prezydenckich miało być wyłącznie korespondencyjne."
+         }
+      }
+   ]
+}
+
+---------------------------------------------------------
+
+
+GET _ml/trained_models/_all
+
+
+
+PUT my-index-elser
+{
+  "mappings": {
+    "properties": {
+      "content_embedding": { 
+        "type": "sparse_vector" 
+      },
+      "content": { 
+        "type": "text" 
+      }
+    }
+  }
+}
+
+
+PUT _ingest/pipeline/elser-v2-test
+{
+  "processors": [
+    {
+      "inference": {
+        "model_id": ".elser_model_2",
+        "input_output": [ 
+          {
+            "input_field": "content",
+            "output_field": "content_embedding"
+          }
+        ]
+      }
+    }
+  ]
+}
+
+
+POST _reindex?wait_for_completion=false
+{
+  "source": {
+    "index": "test-data",
+    "size": 50 
+  },
+  "dest": {
+    "index": "my-index-elser",
+    "pipeline": "elser-v2-test"
+  }
+}
+
+
+
+
+GET _tasks/HgxtqYkeQJOyBx6Q7hClMw:529374
+
+GET /_cat/indices
+
+GET /my-index-elser
+
+GET /my-index-elser/_search
+
+GET my-index-elser/_search
+{
+   "query":{
+      "text_expansion":{
+         "content_embedding":{
+            "model_id":".elser_model_2",
+            "model_text":"How to avoid muscle soreness after running?"
+         }
+      }
+   }
+}
+
+
+---------------------------------------------------------
+---------------------------------------------------------
+---------------------------------------------------------
+---------------------------------------------------------
+---------------------------------------------------------
+---------------------------------------------------------
+---------------------------------------------------------
+
+
+
+HuVyHQD23XOLCY5qmiuNUudk
+
+Username
+    elastic
+Password
+    HuVyHQD23XOLCY5qmiuNUudk
+
+
+PUT _inference/text_embedding/my-e5-model
+{
+  "service": "elasticsearch",
+  "service_settings": {
+    "num_allocations": 1,
+    "num_threads": 1,
+    "model_id": ".multilingual-e5-small" 
+  }
+}

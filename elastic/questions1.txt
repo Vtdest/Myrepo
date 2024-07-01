@@ -1,0 +1,109 @@
+
+Troubleshooting, Repairing, Snapshotting, and Preparing the Cluster
+
+    Troubleshoot and repair any shard allocation issues on both the c1 and c2 cluster nodes, such that all non-system indices are green and replicated as much as they can be.
+    Enable the trial license on the c1 and c2 clusters.
+    Create the sample_data snapshot repository at /mnt/backups/sample_data on the c1 cluster. Then, create the nightly snapshot lifecycle management (SLM) policy as follows:
+        Back up the kibana_sample_data_ecommerce, kibana_sample_data_logs, and kibana_sample_data_flights indices everyday at 2:00 a.m.
+        Back up to the sample_data repository.
+        Name each snapshot nightly-, followed by the current date.
+        Do not include the cluster state.
+        Keep at least 7 snapshots but no more than 30.
+    Create the shakespeare snapshot repository at /mnt/backups/shakespeare on the c1 cluster. Then, create the original snapshot of the shakespeare index at the shakespeare repository.
+    Create the alerts_policy index lifecycle management (ILM) policy on the c1 cluster with the following criteria:
+        Hot phase:
+            Roll the index over at the max primary shard size of 10gb.
+            After rollover, force merge the index into 1 segment for increased read performance.
+            Set the index as read-only after force merging.
+        Cold phase:
+            Enter the cold phase after 30 days.
+            Convert the index to a mounted searchable snapshot in the sample_data repository.
+        Delete phase:
+            Enter the delete phase after 180 days.
+            Delete the index.
+    Create the strings_as_keywords component template on the c1 cluster to dynamically convert all string fields into keyword fields with a max size of 256 characters.
+    Create the shards component template on the c1 cluster to configure 1 primary and 0 replica shards.
+    Create the alerts_template index template on the c1 cluster with the following criteria:
+        Configure the template to manage the alerts_stream data stream.
+        Compose the template of the stings_as_keywords and shards component templates.
+        Configure the template to use the alerts_policy ILM policy.
+    Start the alerts_stream data stream on the c1 cluster.
+
+Challenge
+Ingesting, Updating, and Reindexing Data
+
+    Download and extract the crop_yields dataset. Then use the Data Visualizer to index the dataset to a new crop_yields index with 1 primary and 0 replica shards on the c1 cluster.
+    Remotely reindex the accounts index from the c2 cluster to the c1 cluster with the following transformations:
+        Remove the account_number, age, and gender fields.
+        Index all string fields as type keyword with the exception of the address field, which should be indexed as a text field with a keyword multi-field that only indexes the first 256 characters.
+        Index the balance field as type double.
+        Add a tos_ack field with type boolean.
+        Set the tos_ack field to false for accounts with state equal to VA and set the tos_ack field to true for all other accounts.
+        Allocate the accounts index on the c1 cluster with 1 primary and 0 replica shards.
+    Delete the accounts index from the c2 cluster.
+    Reindex the shakespeare index to a new index called shakespeare_refactored on the c1 cluster with the following configuration:
+        Index the line_number, play_name, speaker, and type fields as type keyword.
+        Index the text_entry field as type text.
+        Index the line_id and speech_number fields as type long.
+        Configure the default analyzer to use the classic tokenizer and remove english stop words case-insensitively.
+        Configure the index with 1 primary and 0 replica shards.
+    Delete the shakespeare index on the c1 cluster and add the alias shakespeare to the shakespeare_refactored index.
+    Update the shakespeare index on the c1 cluster to fix the misspelled "A Winners Tale" play_name to "A Winter's Tale".
+    Reindex the kibana_sample_data_ecommerce index to a new index called ecommerce_fixed on the c1 cluster with the following configuration:
+        Maintain all the same mappings, with the only exception being that the products object should maintain the relationships between nested arrays of objects.
+        Configure the index with 1 primary and 0 replica shards.
+    Delete the kibana_sample_data_ecommerce index on the c1 cluster and add the aliases kibana_sample_data_ecommerce and ecommerce to the ecommerce_fixed index.
+
+Challenge
+Searching Data
+
+    Create the products search template on the c1 cluster to search against the ecommerce dataset with the following requirements:
+        Paginate and parameterize the search results with a default page size of 25 and display the first page by default.
+        Perform a nested type match query on the products path and the products.product_name field with the product parameter.
+        Highlight the search term in the products.product_name field by wrapping the search term in HTML <mark> tags (for example, <mark>search_term</mark>).
+        Sort the search results by geoip.continent_name, then by geoip.city_name, and then by relevancy score, all in descending order.
+    Use the products search template on the c1 cluster to search the ecommerce index for products matching the search term "belt."
+    Configure and execute a cross-cluster search query from the c1 cluster to search the filebeat-7.13.4 index on both the c1 and c2 clusters with the following search criteria:
+        Return up to 100 search results
+        All of the following must match:
+            The term system for the event.module field
+            The term /var/log/secure for the log.file.path field
+            The term sshd for the process.name field
+        At least one of the following should match:
+            The phrase invalid user for the message field
+            The phrase authentication failure for the message field
+            The phrase failed password for the message field
+        The following must not match:
+            The word cloud_user for the message field
+    Create and execute an asynchronous search query on the filebeat-7.13.4 dataset on the c1 cluster to search log messages for any mention of "cloud_user" with the wait_for_completion_timeout parameter set to 0. Then, fetch the async search results.
+
+Challenge
+Aggregating Data
+
+Create an aggregation to answer each of the following questions. Be sure to return a hits array size of 0 for each aggregation since we only care about the aggregation output.
+
+    For the flights index on the c1 cluster, how many unique destination locations are there?
+    For the flights index on the c1 cluster, what are the top 3 destination weather conditions?
+    For the crop_yields index on the c1 cluster, what top 5 countries had the highest average rye yields during the 1980s?
+    For the crop_yields index on the c1 cluster, what is the total crop yield of maize in the United States since the year 2000?
+    For the logs index on the c1 cluster, what is the rate of change for the sum of bytes per day and what is the overall min, max, average, and sum rate of change?
+
+Challenge
+Replicating, Securing, and Restoring Data
+
+    Replicate the accounts index from the c1 cluster to the c2 cluster.
+    Auto-replicate new indices belonging to the alerts_stream data stream from the c1 cluster to the c2 cluster.
+    Create the us_customers_read role on the c1 cluster with the following criteria:
+        Grants read access to the ecommerce index.
+        Only grants access to the customer_full_name, email, customer_phone, and customer_id fields.
+        Only grants access to customers from the United States. (The United States country ISO code is US.)
+    Create the user mbender on the c1 cluster with the following criteria:
+        Full name is Michael Bender
+        Email address is mbender@company.com
+        Password is kUwn7euAj45t
+        Roles are us_customers_read and kibana_user
+    Restore the shakespeare index on the c1 cluster from the original snapshot in the shakespeare repository as the shakespeare_original index.
+
+
+
+
